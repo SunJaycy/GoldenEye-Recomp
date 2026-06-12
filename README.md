@@ -10,8 +10,7 @@ the game runs as a real native executable.
 > [!IMPORTANT]
 > **This repository contains _no_ game code or assets.** It is only the
 > source that wraps the game (menus, hooks, online, post-FX, build
-> config). The recompiled game itself is generated on *your* machine from *your
-> own legally-obtained copy* of GoldenEye 007. You must own the game.
+> config). You must find the game files yourself. This game never released publically
 
 ## Features
 
