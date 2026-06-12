@@ -1,3 +1,5 @@
+Support me on Ko-fi: https://ko-fi.com/sunjayy
+
 # GoldenEye 007 — PC Recompilation
 
 A native PC port of **GoldenEye 007 (Xbox 360 / XBLA)**, built by *statically
