@@ -2,6 +2,11 @@ Support me on Ko-fi: https://ko-fi.com/sunjayy
 
 # GoldenEye 007 — PC Recompilation
 
+
+#Straight to the install!
+create a folder called assets next to the exe and place the game files inside,
+run the exe!
+
 A native PC port of **GoldenEye 007 (Xbox 360 / XBLA)**, built by *statically
 recompiling* the original game into C++ with the
 [ReXGlue SDK](https://github.com/SunJaycy/GoldenEye-Recomp-rexglue). No emulator —
