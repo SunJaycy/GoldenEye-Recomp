@@ -109,3 +109,45 @@ name = "ge_f2_skip"
 registers = ["r3"]
 after_instruction = false
 return_on_true = true
+# --- Mouse-look (real 1:1 looking; see ge_hooks.cpp). All in ge_bondview_control
+# (sub_820B99E8) + the right-stick setter. ---
+# YAW: after the guest stores the per-frame yaw delta (rad) to flt_82F1F914.
+[[midasm_hook]]
+address = 0x820BAB6C
+name = "ge_mouselook_yaw"
+registers = ["r11"]
+after_instruction = true
+# PITCH: after the guest integrates pitch into bondview(+612).
+[[midasm_hook]]
+address = 0x820BB79C
+name = "ge_mouselook_pitch"
+registers = ["r11"]
+after_instruction = true
+# CAMERA PITCH: in ge_bondview_tick, right after flt_82F1F8F8 is finalized
+# (after the clamp + walking auto-level) -> force our pitch on for full range.
+[[midasm_hook]]
+address = 0x820BCF14
+name = "ge_tick_pitch"
+registers = ["r11"]
+after_instruction = true
+# PITCH AUTO-LEVEL DEFEAT: right after the tick eases +612 toward neutral
+# (flt_82F1F8B0), restore our pitch so the view holds (when mouse-look is on).
+[[midasm_hook]]
+address = 0x820BCB30
+name = "ge_pitch_hold"
+registers = ["r11"]
+after_instruction = true
+# MOVE-TO-CENTRE DEFEAT: clear field_104 (+524) right after ge_bondview_control
+# sets it, so the "auto look ahead when moving" pitch ease never runs.
+[[midasm_hook]]
+address = 0x820BB460
+name = "ge_no_autolevel"
+registers = ["r11"]
+after_instruction = true
+# KEYBOARD: after XamInputGetState fills the slot-0 gamepad buffer (unk_830C8B9C)
+# and before ge_input_poll_controllers dispatches it -> OR keyboard buttons in.
+[[midasm_hook]]
+address = 0x823B25E4
+name = "ge_inject_keyboard"
+registers = ["r11"]
+after_instruction = true

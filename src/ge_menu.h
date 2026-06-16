@@ -64,6 +64,11 @@ class GeMenuDialog : public rex::ui::ImGuiDialog {
   ImVec2 f1_{};      // folder body bottom-right
   float tab_w_ = 0;  // width of the right-edge tab strip
 
+  // INPUT tab: which keybind cvar is currently capturing a key (nullptr = none),
+  // and a one-frame guard so the click that starts a rebind isn't itself bound.
+  const char* rebinding_cvar_ = nullptr;
+  int rebind_skip_ = 0;
+
   // ONLINE tab edit state, loaded from the cvars the first time the tab shows
   // (so typing doesn't fight a per-frame reload). Applied on Save & Restart.
   bool online_loaded_ = false;

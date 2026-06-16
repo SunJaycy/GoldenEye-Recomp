@@ -25,6 +25,12 @@
 // boot -- they are read at startup (UserProfile ctor, online client start).
 namespace ge {
 void LaunchSelfDetached();
+// Start the raw-mouse + cursor-capture thread at startup. Implemented in
+// ge_hooks.cpp.
+void InitMouseLook();
+// Suppress mouse-look while the pause menu is open (cursor is needed for the
+// menu, and motion shouldn't turn into look). Implemented in ge_hooks.cpp.
+void SetMouselookSuppressed(bool suppressed);
 }
 
 class GeApp : public rex::ReXApp {
@@ -60,6 +66,7 @@ class GeApp : public rex::ReXApp {
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     rex::ui::RegisterBind("bind_pause_menu", "Escape", "Pause menu",
                           [this] { TogglePauseMenu(); });
+    ge::InitMouseLook();  // start raw-mouse capture/look thread
     postfx_ = std::make_unique<ge::PostFxOverlay>(drawer);
     // Username/server are set in the ONLINE pause-menu tab now -- no first-boot
     // prompt. They apply on the Save & Restart the ONLINE tab triggers.
@@ -85,7 +92,10 @@ class GeApp : public rex::ReXApp {
       return;
     }
     GeMenuDialog::Callbacks cb;
-    cb.on_closed = [this] { menu_ = nullptr; };
+    cb.on_closed = [this] {
+      menu_ = nullptr;
+      ge::SetMouselookSuppressed(false);  // re-enable mouse-look on menu close
+    };
     cb.on_quit = [this] {
       if (runtime() && runtime()->kernel_state()) {
         runtime()->kernel_state()->TerminateTitle();
@@ -120,6 +130,7 @@ class GeApp : public rex::ReXApp {
         app_context().QuitFromUIThread();
       });
     };
+    ge::SetMouselookSuppressed(true);  // freeze mouse-look while the menu is up
     menu_ = new GeMenuDialog(imgui_drawer(), std::move(cb));
   }
 
