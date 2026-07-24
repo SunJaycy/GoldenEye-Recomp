@@ -267,6 +267,21 @@ name = "ge_ce_death_tune"
 registers = []
 after_instruction = false
 jump_address_on_true = 0x820BFB08
+# The leaked XBLA executable left the two N64 dynamic-music AI opcodes as
+# printf-only stubs. Replace the complete stub blocks and return to the common
+# AI interpreter continuation after advancing its bytecode cursor ourselves.
+[[midasm_hook]]
+address = 0x82135BF0
+name = "ge_music_xtrack_play"
+registers = []
+after_instruction = false
+jump_address = 0x82131ACC
+[[midasm_hook]]
+address = 0x82135C10
+name = "ge_music_xtrack_stop"
+registers = []
+after_instruction = false
+jump_address = 0x82131ACC
 # kill-tune 5.0f relocation @0x8209D88C (read +0x3A8 not +0x3AC)
 [[midasm_hook]]
 address = 0x8209D88C
