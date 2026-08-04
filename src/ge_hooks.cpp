@@ -120,6 +120,20 @@ inline void ST16(uint8_t* b, uint32_t ga, uint16_t val) {
 }
 }  // namespace
 
+// sub_821898D0 obtains the display dimensions from these globals at startup,
+// caches them at sp+120/sp+112, and later passes the cached pair to
+// sub_82099B40 to create the full-frame color/depth resolve textures. The
+// intervening initializer chain clobbers the cached slots in the recompiled
+// path (0 and -1), which the XDK header builder encodes as 8192x8191 textures.
+// Their resulting 4 KiB allocations overlap and break the stencil-based body
+// fade composite. Reloading the original source values at the final consumer
+// preserves the retail/Xenia behavior without altering renderer semantics.
+void ge_fix_postfx_resolve_dimensions(PPCRegister& r3, PPCRegister& r4) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  r3.u32 = LD32(base, 0x83093434u);  // display width
+  r4.u32 = LD32(base, 0x83093428u);  // display height
+}
+
 // ===========================================================================
 // Freeze watchdog. Auto-detects the visual freeze (the guest keeps presenting
 // -- present# advancing -- but the GPU command ring stops advancing) and logs
@@ -1262,6 +1276,13 @@ void ge_inject_keyboard(PPCRegister& /*r11*/) {
 // ge_ce_patches.cpp.
 // ===========================================================================
 
+// fix_water_rendering_for_new_graphics @0x8209ECF4: CE NOOPs
+// `lbz r11,-8431(r23)`, which otherwise reloads the HD-graphics flag before
+// the following zero-test and suppresses sub_8214AFC8 (the Frigate water
+// draw). The midasm hook skips that instruction, preserving r11 exactly as a
+// PPC NOP would.
+void ge_ce_water_render() {}
+
 // fix_door_volume_clamp @0x820DD814: `li r3,0` -> `li r3,1` (min volume for
 // distant doors; 0 overflows). After-hook forces r3 = 1.
 void ge_ce_door_vol(PPCRegister& r3) { r3.u32 = 1; }
@@ -1288,6 +1309,12 @@ void ge_ce_near_clip(PPCRegister& r11) {
   PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
   ST32(base, r11.u32 + 0x14u, 0x40000000u);  // 2.0f
 }
+
+// Projection builder sub_8210DFA8 reloads the near clip into f3 immediately
+// before sub_8238B530 constructs the matrix. Pin the live argument as well as
+// the fog global: captures showed the matrix still using 5.0, clipping the
+// Frigate ocean wherever the low camera's view ray hits it within five units.
+void ge_ce_near_clip_projection(PPCRegister& f3) { f3.f64 = 2.0; }
 
 // remove_original_graphics_mode_blur @0x82188E70: CE NOOPs `bne cr6,+0x19C` so
 // the blur path is never taken. Branch-replace -> always fall through.
