@@ -56,6 +56,18 @@ address = 0x82199944
 name = "ge_diag_vdswap"
 registers = ["r31", "r30"]
 after_instruction = true
+
+# The retail startup routine caches the display dimensions in its stack frame,
+# then calls a long chain of graphics initializers before using those values to
+# create the scene/depth resolve textures. In the recompiled path those two
+# stack slots are clobbered to 0/-1, producing 8192x8191 sentinel fetches whose
+# color and depth allocations overlap. Reload the same canonical display globals
+# immediately before sub_82099B40 consumes r3/r4.
+[[midasm_hook]]
+address = 0x821899E4
+name = "ge_fix_postfx_resolve_dimensions"
+registers = ["r3", "r4"]
+after_instruction = true
 [[midasm_hook]]
 address = 0x8209F5F0
 name = "ge_hook_830E0670"
@@ -133,6 +145,14 @@ after_instruction = false
 jump_address_on_true = 0x82189F4C
 jump_address_on_false = 0x82189F30
 # --- BeanTools Community Edition CODE fixes (instruction patches; see ge_hooks.cpp) ---
+# fix_water_rendering_for_new_graphics @0x8209ECF4: NOOP the graphics-mode
+# flag load so the restored Frigate water draw is not suppressed in HD mode.
+[[midasm_hook]]
+address = 0x8209ECF4
+name = "ge_ce_water_render"
+registers = []
+after_instruction = false
+jump_address = 0x8209ECF8
 # fix_door_volume_clamp @0x820DD814: li r3,0 -> li r3,1
 [[midasm_hook]]
 address = 0x820DD814
@@ -156,6 +176,14 @@ after_instruction = true
 address = 0x82117B44
 name = "ge_ce_near_clip"
 registers = ["r11"]
+after_instruction = true
+# The camera projection later reloads the near clip at 0x8210E0DC. Pin the
+# live f3 argument there too: the fog-global value can return to 5.0 after the
+# earlier CE store, which clips Frigate water close to the low boat camera.
+[[midasm_hook]]
+address = 0x8210E0DC
+name = "ge_ce_near_clip_projection"
+registers = ["f3"]
 after_instruction = true
 # remove_original_graphics_mode_blur @0x82188E70: NOOP `bne cr6,+0x19C`
 [[midasm_hook]]
