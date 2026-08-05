@@ -41,6 +41,19 @@ To play online, someone needs to run a server.
 4. Save and restart
 5. Host or join a match
 
+### Optional launcher and public lobby browser
+
+[GoldenEye Recomp Online](https://github.com/mrfox-1/GoldenEye-Recomp-Online) is a separate,
+open-source launcher and relay-management project for this recomp. It adds a persistent player
+profile, public multi-relay lobby browsing, selected-lobby launching, private invite-code lobbies,
+build compatibility warnings, and guided relay hosting without changing GoldenEye's original
+System Link menus.
+
+Download its complete ZIP from the
+[latest release](https://github.com/mrfox-1/GoldenEye-Recomp-Online/releases/latest), select the
+folder containing the recomp executable, and use **Browse online** or enter a relay directly. The
+project includes its coordinated ReXGlue runtime and relay server, but no GoldenEye game assets.
+
 ## Building
 
 If you want to build from source you'll need:
