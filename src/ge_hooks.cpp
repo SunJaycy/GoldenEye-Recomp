@@ -25,6 +25,7 @@
 #include <rex/system/xthread.h>
 #include <rex/system/kernel_state.h>
 #include <cstdio>
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -33,6 +34,20 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>  // ShellExecuteW (WIN32_LEAN_AND_MEAN excludes it)
+#else
+// The SDK's Linux windowing is GTK with GDK_BACKEND forced to x11 (see the
+// SDK's windowed_app_main_posix.cpp), so there is always an X11 server behind
+// the window. Talk to it directly: Xlib is what supplies the three things the
+// Win32 path gets from the OS -- pointer grab/confine, raw-ish relative motion,
+// and a GetAsyncKeyState equivalent (XQueryKeymap).
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#include <X11/Xutil.h>
+#include <X11/keysym.h>
+#include <array>
+#include <sys/mman.h>   // mincore (guest-stack mapping probe)
+#include <unistd.h>     // readlink, fork, execl, setsid, sysconf, getpid
+#endif
 #include <string>
 
 namespace ge {
@@ -42,6 +57,7 @@ namespace ge {
 // the current process down. Launching a second instance of a running exe is fine
 // on Windows -- the image file is opened share-read.
 void LaunchSelfDetached() {
+#ifdef _WIN32
   wchar_t exe_path[MAX_PATH];
   DWORD n = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
   if (n == 0 || n >= MAX_PATH) {
@@ -53,6 +69,27 @@ void LaunchSelfDetached() {
   std::wstring workdir = (slash == std::wstring::npos) ? std::wstring() : full.substr(0, slash);
   ShellExecuteW(nullptr, L"open", exe_path, nullptr,
                 workdir.empty() ? nullptr : workdir.c_str(), SW_SHOWNORMAL);
+#else
+  // Linux: /proc/self/exe is our own image; fork + setsid detaches the child
+  // from this process group so it survives the caller tearing itself down.
+  char exe_path[4096];
+  ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+  if (n <= 0) {
+    return;  // can't resolve our own path; skip relaunch (caller still quits)
+  }
+  exe_path[n] = '\0';
+  // Run it from the exe's own directory so a normal boot's relative paths hold.
+  std::string full(exe_path, exe_path + n);
+  size_t slash = full.find_last_of('/');
+  std::string workdir = (slash == std::string::npos) ? std::string() : full.substr(0, slash);
+  pid_t pid = fork();
+  if (pid == 0) {
+    setsid();
+    if (!workdir.empty() && chdir(workdir.c_str()) != 0) _exit(1);
+    execl(exe_path, exe_path, static_cast<char*>(nullptr));
+    _exit(1);  // execl only returns on failure
+  }
+#endif
 }
 }  // namespace ge
 
@@ -130,6 +167,41 @@ namespace {
 std::atomic<uint32_t> g_ge_device{0};   // device struct (dev) seen by ge_dbg_now
 std::atomic<uint32_t> g_ge_idblk{0};    // id-block (idblk) seen by ge_dbg_now
 std::atomic<uint32_t> g_dbgnow_calls{0};  // increments each ge_dbg_now (guest polling sub_82198C28)
+
+// How far past `p` is it safe to read, capped at `p + len`? The guest stack
+// walks below scan raw guest memory for return addresses, and the guest
+// reservation has holes -- without this probe a hang diagnostic would fault.
+// Returns `p` itself when nothing at `p` is readable.
+static uint8_t* ge_readable_end(uint8_t* p, size_t len) {
+#ifdef _WIN32
+  MEMORY_BASIC_INFORMATION mbi;
+  if (VirtualQuery(p, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT ||
+      (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                      PAGE_EXECUTE_READWRITE)) == 0) {
+    return p;
+  }
+  uint8_t* rend = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+  return (p + len > rend) ? rend : p + len;
+#else
+  // mincore() fails with ENOMEM as soon as the queried range covers an
+  // unmapped page, so walking it page-block by page-block yields the mapped
+  // prefix -- the same guarantee VirtualQuery's MEM_COMMIT check gives.
+  const long ps_raw = sysconf(_SC_PAGESIZE);
+  if (ps_raw <= 0) return p;
+  const size_t ps = static_cast<size_t>(ps_raw);
+  uint8_t* end = p + len;
+  uint8_t* cur = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(p) & ~(uintptr_t)(ps - 1));
+  unsigned char vec[64];
+  while (cur < end) {
+    size_t pages = (static_cast<size_t>(end - cur) + ps - 1) / ps;
+    if (pages > sizeof(vec)) pages = sizeof(vec);
+    if (mincore(cur, pages * ps, vec) != 0) break;  // ENOMEM -> unmapped hole
+    cur += pages * ps;
+  }
+  if (cur <= p) return p;
+  return (cur > end) ? end : cur;
+#endif
+}
 
 void ge_watchdog_thread() {
   uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
@@ -258,14 +330,8 @@ void ge_watchdog_thread() {
               uint32_t sp = c->r1.u32;
               if (sp >= 0x10000u && sp < 0xC0000000u) {
                 uint8_t* hsp = base + sp;
-                MEMORY_BASIC_INFORMATION mbi;
-                if (VirtualQuery(hsp, &mbi, sizeof(mbi)) == sizeof(mbi) &&
-                    mbi.State == MEM_COMMIT &&
-                    (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                    PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0) {
-                  uint8_t* rend = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
-                  uint8_t* send = hsp + 0x2400u;
-                  if (send > rend) send = rend;  // never read past the committed page
+                uint8_t* send = ge_readable_end(hsp, 0x2400u);  // never read past mapped memory
+                if (send > hsp) {
                   char sbuf[500];
                   int soff = 0;
                   sbuf[0] = 0;
@@ -351,12 +417,8 @@ void ge_watchdog_thread() {
                   int fo = std::snprintf(fb, sizeof(fb), "lr=%x | ", pc);
                   if (sp >= 0x10000u && sp < 0xC0000000u) {
                     uint8_t* hsp = base + sp;
-                    MEMORY_BASIC_INFORMATION mbi;
-                    if (VirtualQuery(hsp, &mbi, sizeof(mbi)) == sizeof(mbi) &&
-                        mbi.State == MEM_COMMIT) {
-                      uint8_t* rend = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
-                      uint8_t* send = hsp + 0x2800u;
-                      if (send > rend) send = rend;
+                    uint8_t* send = ge_readable_end(hsp, 0x2800u);
+                    if (send > hsp) {
                       for (uint8_t* pp = hsp; pp + 4 <= send && fo < 580; pp += 4) {
                         uint32_t v;
                         std::memcpy(&v, pp, 4);
@@ -712,13 +774,23 @@ std::atomic<bool> g_mouselook_suppressed{false};  // set true while the pause me
 std::atomic<bool> g_rebind_capturing{false};
 
 // Cursor-capture state (touched from the mouse thread + SetMouselookSuppressed).
+#ifdef _WIN32
 HWND g_game_hwnd = nullptr;
 HCURSOR g_arrow_cursor = nullptr;
 HCURSOR g_blank_cursor = nullptr;
+#else
+// Our own X11 connection, opened lazily. Deliberately separate from the one GTK
+// uses: Xlib connections are not safe to share across threads without locking,
+// and this is driven from the mouse thread plus ge_key_down on the guest thread.
+Display* g_x11_dpy = nullptr;
+Window g_game_window = 0;   // cached toplevel of ours (survives focus loss)
+Cursor g_blank_cursor = 0;
+#endif
 bool g_captured = false;
 
 bool ge_mouselook_on() { return REXCVAR_GET(ge_mouselook_enable); }
 
+#ifdef _WIN32
 bool ge_game_has_focus() {
   HWND fg = GetForegroundWindow();
   if (!fg) return false;
@@ -738,6 +810,88 @@ HWND ge_game_window() {
   }
   return g_game_hwnd;
 }
+#else
+// One shared connection for the whole file. XInitThreads must precede the first
+// XOpenDisplay to make concurrent use from the mouse thread and the guest thread
+// safe. GTK has already opened its own display by the time any of this runs.
+Display* ge_x11_display() {
+  static Display* dpy = [] {
+    XInitThreads();
+    return XOpenDisplay(nullptr);
+  }();
+  return dpy;
+}
+
+// The window manager reparents our toplevel, so the focus window is usually a
+// child (or a frame) rather than the window we created. Walk up to the first
+// ancestor carrying _NET_WM_PID and compare it against our own pid -- that is
+// the X11 equivalent of the Win32 GetWindowThreadProcessId owning-pid check.
+bool ge_x11_window_is_ours(Display* dpy, Window w) {
+  static Atom pid_atom = XInternAtom(dpy, "_NET_WM_PID", False);
+  if (pid_atom == None) return false;
+  Atom type = None;
+  int format = 0;
+  unsigned long nitems = 0, bytes_after = 0;
+  unsigned char* prop = nullptr;
+  if (XGetWindowProperty(dpy, w, pid_atom, 0, 1, False, XA_CARDINAL, &type, &format, &nitems,
+                         &bytes_after, &prop) != Success) {
+    return false;
+  }
+  bool ours = false;
+  if (prop) {
+    if (type == XA_CARDINAL && format == 32 && nitems >= 1) {
+      ours = *reinterpret_cast<unsigned long*>(prop) == static_cast<unsigned long>(getpid());
+    }
+    XFree(prop);
+  }
+  return ours;
+}
+
+// The visible game window (whichever of ours holds focus). Cached so we can
+// still release the cursor after focus has moved elsewhere.
+Window ge_game_window() {
+  Display* dpy = ge_x11_display();
+  if (!dpy) return 0;
+  Window focus = None;
+  int revert = 0;
+  XGetInputFocus(dpy, &focus, &revert);
+  // Climb to the root, checking each ancestor. PointerRoot/None mean "no focus".
+  for (Window w = focus; w != None && w != PointerRoot;) {
+    if (ge_x11_window_is_ours(dpy, w)) {
+      g_game_window = w;
+      return g_game_window;
+    }
+    Window root = None, parent = None, *children = nullptr;
+    unsigned int nchildren = 0;
+    if (!XQueryTree(dpy, w, &root, &parent, &children, &nchildren)) break;
+    if (children) XFree(children);
+    if (parent == None || parent == root) break;
+    w = parent;
+  }
+  return g_game_window;  // stale handle: lets us still ungrab after focus loss
+}
+
+// Focus is ours only when the *current* focus chain resolves to one of our
+// windows -- ge_game_window() returns the cached handle even when it does not,
+// so re-derive it here rather than testing the cache.
+bool ge_game_has_focus() {
+  Display* dpy = ge_x11_display();
+  if (!dpy) return false;
+  Window focus = None;
+  int revert = 0;
+  XGetInputFocus(dpy, &focus, &revert);
+  for (Window w = focus; w != None && w != PointerRoot;) {
+    if (ge_x11_window_is_ours(dpy, w)) return true;
+    Window root = None, parent = None, *children = nullptr;
+    unsigned int nchildren = 0;
+    if (!XQueryTree(dpy, w, &root, &parent, &children, &nchildren)) break;
+    if (children) XFree(children);
+    if (parent == None || parent == root) break;
+    w = parent;
+  }
+  return false;
+}
+#endif
 
 // Active = mouse-look on, no menu up, and we own focus. Drives both delta
 // collection and cursor capture.
@@ -746,6 +900,7 @@ bool ge_mouse_active() {
          ge_game_has_focus();
 }
 
+#ifdef _WIN32
 HCURSOR ge_make_blank_cursor() {
   // 32x32 fully transparent cursor (AND=1 / XOR=0 == transparent everywhere).
   BYTE and_mask[32 * 32 / 8];
@@ -842,6 +997,83 @@ void ge_mouse_thread() {
     DispatchMessageW(&m);
   }
 }
+
+#else
+// A 1x1 fully-transparent cursor, the Xlib counterpart of the Win32 blank
+// HCURSOR. XDefineCursor alone cannot hide a pointer, so this is the standard
+// way to do it.
+Cursor ge_x11_blank_cursor(Display* dpy, Window win) {
+  if (g_blank_cursor) return g_blank_cursor;
+  char zero[8] = {0};
+  Pixmap pm = XCreateBitmapFromData(dpy, win, zero, 1, 1);
+  XColor black{};
+  g_blank_cursor = XCreatePixmapCursor(dpy, pm, pm, &black, &black, 0, 0);
+  XFreePixmap(dpy, pm);
+  return g_blank_cursor;
+}
+
+// Win32 hides the cursor via a blank class cursor and confines it with
+// ClipCursor; XGrabPointer does both at once (confine_to + cursor) and also
+// routes button events to us while grabbed.
+void ge_update_mouse_capture() {
+  Display* dpy = ge_x11_display();
+  if (!dpy) return;
+  Window win = ge_game_window();
+  const bool want = ge_mouse_active() && win != 0;
+  if (want == g_captured) return;
+  g_captured = want;
+  if (want) {
+    XGrabPointer(dpy, win, True,
+                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                 GrabModeAsync, GrabModeAsync, win, ge_x11_blank_cursor(dpy, win), CurrentTime);
+    XFlush(dpy);
+    REXKRNL_INFO("GEMOUSE capture ON  win={:#x}", static_cast<unsigned long>(win));
+  } else {
+    XUngrabPointer(dpy, CurrentTime);
+    XFlush(dpy);
+  }
+}
+
+// There is no message-only window to own here, so a plain polling thread stands
+// in for the Win32 WM_TIMER + WM_INPUT pair: same ~60Hz capture-state tick.
+// X11 has no relative-motion accumulator, so recentre the pointer each tick and
+// measure the offset from the centre -- the classic warp trick. The warp itself
+// generates motion, hence the "did we just warp" guard.
+void ge_mouse_thread() {
+  REXKRNL_INFO("GEMOUSE thread up: X11 pointer-warp polling");
+  Display* dpy = ge_x11_display();
+  if (!dpy) {
+    REXKRNL_INFO("GEMOUSE no X11 display; mouse-look disabled");
+    return;
+  }
+  for (;;) {
+    ge_update_mouse_capture();
+    if (g_captured && g_game_window) {
+      XWindowAttributes wa{};
+      if (XGetWindowAttributes(dpy, g_game_window, &wa) && wa.width > 1 && wa.height > 1) {
+        const int cx = wa.width / 2, cy = wa.height / 2;
+        Window root_ret = None, child_ret = None;
+        int rx = 0, ry = 0, wx = 0, wy = 0;
+        unsigned int mask = 0;
+        if (XQueryPointer(dpy, g_game_window, &root_ret, &child_ret, &rx, &ry, &wx, &wy, &mask)) {
+          const int dx = wx - cx, dy = wy - cy;
+          if (dx != 0 || dy != 0) {
+            static std::atomic<bool> logged{false};
+            bool exp = false;
+            if (logged.compare_exchange_strong(exp, true))
+              REXKRNL_INFO("GEMOUSE first motion dx={} dy={}", dx, dy);
+            g_mouse_dx.fetch_add(dx, std::memory_order_relaxed);
+            g_mouse_dy.fetch_add(dy, std::memory_order_relaxed);
+            XWarpPointer(dpy, None, g_game_window, 0, 0, 0, 0, cx, cy);
+            XFlush(dpy);
+          }
+        }
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  }
+}
+#endif
 
 void ge_start_mouse_once() {
   static std::atomic<bool> started{false};
@@ -1121,6 +1353,100 @@ bool ge_input_active() {  // keyboard counts only when focused + not in the menu
 // Is any key bound to cvar `name` held down? The bind may list SEVERAL keys
 // separated by commas (#63 "multiple keys per function", e.g. "W,Up") -- held if
 // ANY of them is down. Each key name parses to a virtual key (== Windows VK code).
+#ifndef _WIN32
+// VirtualKey values are Windows VK codes, so map them to X11 keysyms. Only the
+// bindable keys matter -- anything absent simply never reports as held, which is
+// the same outcome the Windows path gives for an unmapped VK.
+KeySym ge_vk_to_keysym(rex::ui::VirtualKey vk) {
+  using VK = rex::ui::VirtualKey;
+  const uint16_t c = static_cast<uint16_t>(vk);
+  if (c >= 'A' && c <= 'Z') return XK_a + (c - 'A');   // VK_A..VK_Z are 'A'..'Z'
+  if (c >= '0' && c <= '9') return XK_0 + (c - '0');   // VK_0..VK_9 are '0'..'9'
+  if (c >= 0x70 && c <= 0x87) return XK_F1 + (c - 0x70);  // VK_F1..VK_F24
+  if (c >= 0x60 && c <= 0x69) return XK_KP_0 + (c - 0x60);  // VK_NUMPAD0..9
+  switch (vk) {
+    case VK::kBack:     return XK_BackSpace;
+    case VK::kTab:      return XK_Tab;
+    case VK::kReturn:   return XK_Return;
+    case VK::kShift:    return XK_Shift_L;
+    case VK::kControl:  return XK_Control_L;
+    case VK::kMenu:     return XK_Alt_L;
+    case VK::kPause:    return XK_Pause;
+    case VK::kCapital:  return XK_Caps_Lock;
+    case VK::kEscape:   return XK_Escape;
+    case VK::kSpace:    return XK_space;
+    case VK::kPrior:    return XK_Prior;
+    case VK::kNext:     return XK_Next;
+    case VK::kEnd:      return XK_End;
+    case VK::kHome:     return XK_Home;
+    case VK::kLeft:     return XK_Left;
+    case VK::kUp:       return XK_Up;
+    case VK::kRight:    return XK_Right;
+    case VK::kDown:     return XK_Down;
+    case VK::kInsert:   return XK_Insert;
+    case VK::kDelete:   return XK_Delete;
+    case VK::kLShift:   return XK_Shift_L;
+    case VK::kRShift:   return XK_Shift_R;
+    case VK::kLControl: return XK_Control_L;
+    case VK::kRControl: return XK_Control_R;
+    case VK::kLMenu:    return XK_Alt_L;
+    case VK::kRMenu:    return XK_Alt_R;
+    case VK::kMultiply: return XK_KP_Multiply;
+    case VK::kAdd:      return XK_KP_Add;
+    case VK::kSubtract: return XK_KP_Subtract;
+    case VK::kDecimal:  return XK_KP_Decimal;
+    case VK::kDivide:   return XK_KP_Divide;
+    case VK::kNumLock:  return XK_Num_Lock;
+    case VK::kScroll:   return XK_Scroll_Lock;
+    case VK::kOem1:     return XK_semicolon;
+    case VK::kOemPlus:  return XK_equal;
+    case VK::kOemComma: return XK_comma;
+    case VK::kOemMinus: return XK_minus;
+    case VK::kOemPeriod:return XK_period;
+    case VK::kOem2:     return XK_slash;
+    case VK::kOem3:     return XK_grave;
+    case VK::kOem4:     return XK_bracketleft;
+    case VK::kOem5:     return XK_backslash;
+    case VK::kOem6:     return XK_bracketright;
+    case VK::kOem7:     return XK_apostrophe;
+    default:            return NoSymbol;
+  }
+}
+
+// GetAsyncKeyState equivalent. Mouse buttons (LMB/RMB are bindable defaults)
+// come from the pointer mask; everything else from the 256-bit key bitmap.
+// Note X11 numbers the middle button 2 and the right button 3.
+bool ge_vk_is_down(rex::ui::VirtualKey vk) {
+  Display* dpy = ge_x11_display();
+  if (!dpy) return false;
+  switch (vk) {
+    case rex::ui::VirtualKey::kLButton:
+    case rex::ui::VirtualKey::kMButton:
+    case rex::ui::VirtualKey::kRButton: {
+      Window root_ret = None, child_ret = None;
+      int rx = 0, ry = 0, wx = 0, wy = 0;
+      unsigned int mask = 0;
+      if (!XQueryPointer(dpy, DefaultRootWindow(dpy), &root_ret, &child_ret, &rx, &ry, &wx, &wy,
+                         &mask)) {
+        return false;
+      }
+      if (vk == rex::ui::VirtualKey::kLButton) return (mask & Button1Mask) != 0;
+      if (vk == rex::ui::VirtualKey::kMButton) return (mask & Button2Mask) != 0;
+      return (mask & Button3Mask) != 0;
+    }
+    default:
+      break;
+  }
+  const KeySym ks = ge_vk_to_keysym(vk);
+  if (ks == NoSymbol) return false;
+  const KeyCode kc = XKeysymToKeycode(dpy, ks);
+  if (kc == 0) return false;
+  char keys[32];
+  XQueryKeymap(dpy, keys);
+  return (keys[kc / 8] & (1 << (kc % 8))) != 0;
+}
+#endif
+
 bool ge_key_down(const char* name) {
   std::string binds = rex::cvar::GetFlagByName(name);
   if (binds.empty()) return false;
@@ -1133,9 +1459,13 @@ bool ge_key_down(const char* name) {
     while (!one.empty() && (one.back() == ' ' || one.back() == '\t')) one.pop_back();
     if (!one.empty()) {
       rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(one);
+#ifdef _WIN32
       if (vk != rex::ui::VirtualKey::kNone &&
           (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0)
         return true;
+#else
+      if (vk != rex::ui::VirtualKey::kNone && ge_vk_is_down(vk)) return true;
+#endif
     }
     if (comma == std::string::npos) break;
     start = comma + 1;

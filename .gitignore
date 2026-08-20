@@ -18,6 +18,7 @@
 # --- Game files: provide your OWN legally-owned copy of GoldenEye 007 ---
 # (the XEX + extracted assets go in assets/). Never committed.
 /assets/*
+/assets
 !/assets/.gitkeep
 
 # --- Runtime config (written by the game at runtime) ---
