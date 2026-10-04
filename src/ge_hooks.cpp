@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 
 #include "ge_init.h"   // PPCRegister/PPCContext + generated function decls
 #include <rex/cvar.h>  // REXCVAR_* (mouse-look settings)
@@ -932,6 +933,20 @@ void ge_mouse_camera(uint8_t* base) {
   const float mdx = static_cast<float>(ge_take_mouse_dx());
   const float mdy = static_cast<float>(ge_take_mouse_dy());
 
+  // Last-used device wins. The camera/crosshair overrides below are for the
+  // mouse; with a controller they fought the game's own stick aiming (aim-mode
+  // pinned the crosshair to the centre every frame, so the right stick barely
+  // moved it) and forced auto-aim/look-ahead off. Mouse movement switches them
+  // on; right-stick movement hands control back to the game.
+  static bool mouse_mode = false;
+  {
+    // slot-0 gamepad (GE_PAD0) right stick, s16 big-endian at +8 / +10
+    const int16_t rx = static_cast<int16_t>(LD16(base, 0x830C8B9Cu + 8));
+    const int16_t ry = static_cast<int16_t>(LD16(base, 0x830C8B9Cu + 10));
+    if (mdx != 0.f || mdy != 0.f) mouse_mode = true;
+    else if (std::abs(rx) > 8000 || std::abs(ry) > 8000) mouse_mode = false;
+  }
+
   // Move the menu selection crosshair (the game's own menus read these).
   {
     float menuX = LDF32(base, GE_MENU_XY);
@@ -976,7 +991,7 @@ void ge_mouse_camera(uint8_t* base) {
   // xenia's exact behaviour. (Doing it every frame oscillated against the game's
   // per-frame auto-aim in multiplayer and caused the camera jitter.)
   if (game_pause_flag != prev_pause || game_control_disabled != prev_disabled) {
-    const uint32_t sp = LD32(base, GE_SETTINGS_PTR);
+    const uint32_t sp = mouse_mode ? LD32(base, GE_SETTINGS_PTR) : 0u;
     if (sp) {
       const uint32_t sva = sp + GE_SETTINGS_BITS;
       uint32_t settings = LD32(base, sva);
@@ -990,6 +1005,7 @@ void ge_mouse_camera(uint8_t* base) {
   }
 
   if (game_control_disabled) return;
+  if (!mouse_mode) return;  // controller: leave aiming to the game
 
   const uint32_t aim_mode = LD32(base, player + GE_OFF_AIM_MODE);
   if (aim_mode != prev_aim_mode) {
