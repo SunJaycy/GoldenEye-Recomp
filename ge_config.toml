@@ -310,3 +310,38 @@ name = "ge_ce_watch_sfx_save"
 registers = []
 after_instruction = false
 jump_address = 0x820C81B0
+# --- Pause-screen watch arm: only the costume's sleeve (see ge_sleeve_cond) ---
+# mark the watch-hand draw (sub_820BE560 around its two sub_8209AB98 calls)
+[[midasm_hook]]
+address = 0x820BEAC8
+name = "ge_sleeve_draw_begin"
+registers = []
+after_instruction = false
+[[midasm_hook]]
+address = 0x820BEACC
+name = "ge_sleeve_draw_end"
+registers = []
+after_instruction = false
+[[midasm_hook]]
+address = 0x820BEAEC
+name = "ge_sleeve_draw_begin"
+registers = []
+after_instruction = false
+[[midasm_hook]]
+address = 0x820BEAF0
+name = "ge_sleeve_draw_end"
+registers = []
+after_instruction = false
+# capture the game's SW_* switch values (sub_820997E0 -> sub_8209D4E8)
+[[midasm_hook]]
+address = 0x82099880
+name = "ge_sleeve_capture_switch"
+registers = ["r4", "r5"]
+after_instruction = false
+# skip draws of sleeve blocks whose switch is off (stream interpreter dispatch)
+[[midasm_hook]]
+address = 0x823A7390
+name = "ge_sleeve_cond"
+registers = ["r11", "r31"]
+after_instruction = false
+jump_address_on_true = 0x823A73FC

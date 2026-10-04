@@ -1573,3 +1573,97 @@ void ge_ce_watch_sfx_save() {
   ctx->r4.u32 = ctx->r4.u32 + ctx->r4.u32;
   ge_cont_82184E48(*ctx, base);
 }
+
+// ===========================================================================
+// Pause-screen watch arm: show only the current costume's sleeve.
+//
+// The watch arm model (char\suitlfhand) contains every costume's sleeve, and the
+// game's cuff code (sub_820B3168) already switches on the right one through the
+// arm's N64 switches SW_BOILER / SW_DINNER / SW_CONNERY / SW_SUIT / SW_TIMBER /
+// SW_SNOW. The XBLA renderer applies switches to a model through *named
+// conditions*: each frame sub_820997E0 copies every switch's state into the model's
+// condition of the same name (sub_8209D4E8), and the model's draw stream skips
+// geometry wrapped in a COND record (0x17 {id, target}) whose condition bit is off
+// (interpreter sub_823A7330, test sub_8240A5A0). That is how e.g. the PP7's
+// SW_FLASH / SW_FINGER parts work. Rare's arm assets declare no conditions and
+// wrap no geometry in COND, so every sleeve is drawn, stacked on top of each other
+// (tux + snow in HD, tux + green in classic) on every level.
+//
+// Fix: capture the game's own SW_* values for the arm and, while the watch hand is
+// being drawn, skip the draws of each sleeve block whose switch is off -- exactly
+// what the missing CONDs would do. Blocks are counted by BONEPAL (0x13) records.
+// ===========================================================================
+REXCVAR_DEFINE_BOOL(ge_sleeve_fix, true, "Game", "Show only the costume's sleeve on the pause-screen watch arm");
+
+namespace {
+constexpr const char* kSleeveSw[6] = {"SW_BOILER", "SW_DINNER", "SW_CONNERY", "SW_SUIT", "SW_TIMBER", "SW_SNOW"};
+// stream block -> the sleeve switches that show it (bit i = kSleeveSw[i]), 0 = always drawn
+enum : uint8_t { kBoiler = 1, kDinner = 2, kConnery = 4, kSuit = 8, kTimber = 16, kSnow = 32 };
+// HD model (files\new, 11 blocks): 4 tux, 5 jungle, 6 snow, 7 black tactical, 8 suit
+constexpr uint8_t kHdBlockSw[11] = {0, 0, 0, 0, kDinner, kTimber, kSnow, kBoiler, kSuit, 0, 0};
+// classic model (files\original, 22 blocks, N64 display lists in tree order): hand 0-5,
+// boiler 6-7, white shirt cuff 8 (shared by the tux and the suit), tux jacket 9,
+// Connery 10, suit 11, jungle 12, snow 13, watch 14-21
+constexpr uint8_t kClassicBlockSw[22] = {0, 0, 0, 0, 0, 0, kBoiler, kBoiler, kDinner | kSuit, kDinner,
+                                         kConnery, kSuit, kTimber, kSnow, 0, 0, 0, 0, 0, 0, 0, 0};
+std::atomic<int> g_sleeve_sw[6] = {-1, -1, -1, -1, -1, -1};  // -1 unknown, else 0/1
+thread_local bool g_arm_drawing = false;
+thread_local uint32_t g_arm_stream = 0;      // header of the arm stream being drawn
+thread_local uint32_t g_arm_blk_start[33];   // record address of each block (+ end)
+thread_local int g_arm_nblk = 0;
+
+// walk the stream from its header and record where every block starts
+bool ge_sleeve_map_blocks(uint8_t* base, uint32_t stream) {
+  int blk = -1;
+  uint32_t pc = stream + 0x24u;
+  for (int n = 0; n < 4096; n++) {
+    const uint32_t tag = LD32(base, pc), size = tag >> 16, type = (tag >> 8) & 0xFF;
+    if (size < 4 || size > 0x400) return false;
+    if (type == 0x1D) break;                                    // END
+    if (type == 0x13 && ++blk < 32) g_arm_blk_start[blk] = pc;  // BONEPAL opens a block
+    pc += size;
+  }
+  if (blk < 8 || blk >= 32) return false;
+  g_arm_nblk = blk + 1;
+  g_arm_blk_start[g_arm_nblk] = pc;
+  return true;
+}
+}  // namespace
+
+// watch-hand draw (sub_820BE560), around each of its two sub_8209AB98 calls
+void ge_sleeve_draw_begin() { g_arm_drawing = true; g_arm_stream = 0; }
+void ge_sleeve_draw_end() { g_arm_drawing = false; }
+
+// sub_820997E0 @0x82099880, at `bl sub_8209D4E8(hdmodel, name, visible)`: the
+// game's own switch -> condition copy. Remember the arm's sleeve switch values.
+void ge_sleeve_capture_switch(PPCRegister& r4, PPCRegister& r5) {
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  const char* name = reinterpret_cast<const char*>(base + r4.u32);
+  if (name[0] != 'S' || name[1] != 'W' || name[2] != '_') return;
+  for (int i = 0; i < 6; i++)
+    if (std::strcmp(name, kSleeveSw[i]) == 0) g_sleeve_sw[i].store(r5.u32 ? 1 : 0);
+}
+
+// HD stream interpreter (sub_823A7330) record dispatch @0x823A7390, after
+// `lbz r11,2(r31)`: r11 = record type, r31 = record. true = skip the record.
+bool ge_sleeve_cond(PPCRegister& r11, PPCRegister& r31) {
+  if (!g_arm_drawing || !REXCVAR_GET(ge_sleeve_fix)) return false;
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  if (!g_arm_stream) {  // first record of the arm's stream: map its blocks
+    if (LD32(base, r31.u32) != 0x000C0C00u) { g_arm_drawing = false; return false; }
+    g_arm_stream = r31.u32 - 0x24u;
+    if (!ge_sleeve_map_blocks(base, g_arm_stream)) { g_arm_drawing = false; return false; }
+  }
+  const uint32_t type = r11.u32;
+  if (type != 0x01 && type != 0x30) return false;  // only DRAW / DRAWN
+  const uint8_t* map = g_arm_nblk == 11 ? kHdBlockSw : g_arm_nblk == 22 ? kClassicBlockSw : nullptr;
+  if (!map) return false;
+  for (int b = 0; b < g_arm_nblk; b++)
+    if (r31.u32 >= g_arm_blk_start[b] && r31.u32 < g_arm_blk_start[b + 1]) {
+      if (!map[b]) return false;                          // not a sleeve: always drawn
+      for (int i = 0; i < 6; i++)                         // drawn if any owning switch is on
+        if ((map[b] >> i & 1) && g_sleeve_sw[i].load() != 0) return false;
+      return true;                                        // all its switches off -> skip
+    }
+  return false;
+}
