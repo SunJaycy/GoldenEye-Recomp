@@ -1,5 +1,7 @@
 # THIS IS A WORK IN PROGRESS
 
+<a href="https://recomplauncher.com/game/goldeneye-recomp"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 # GoldenEye 007 PC Recompilation
 
 A native PC recompilation of the Xbox 360 version of GoldenEye 007.
