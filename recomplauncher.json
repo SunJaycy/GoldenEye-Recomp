@@ -1,0 +1,23 @@
+{
+    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+    "format": 1,
+    "repo": "SunJaycy/GoldenEye-Recomp",
+    "name": "GoldenEye 007 PC Recompilation",
+    "requires": [
+        "start",
+        "files.folder"
+    ],
+    "game": {
+        "kind": "folder",
+        "label": "Your GoldenEye 007 (XBLA, Xbox 360) game files, as an extracted folder with default.xex. The launcher puts them in the game's assets folder.",
+        "check": {
+            "file": "default.xex"
+        }
+    },
+    "start": {
+        "program": [
+            "ge.exe",
+            "GoldenEye.exe"
+        ]
+    }
+}
